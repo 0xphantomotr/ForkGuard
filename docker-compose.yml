@@ -1,0 +1,86 @@
+version: '3.8'
+
+# This compose file sets up the full local development environment for ForkGuard.
+# It includes the core infrastructure (Postgres, Redis, Redpanda), a mock
+# Ethereum node (Anvil), and an observability stack (Prometheus, Grafana, Jaeger).
+
+services:
+  # Core Infrastructure
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: forkguard
+      POSTGRES_PASSWORD: forkguard
+      POSTGRES_DB: forkguard
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forkguard -d forkguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --overprovisioned
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"   # Kafka API
+      - "9644:9644"   # Redpanda Admin
+
+  # Ethereum Mock Node
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    container_name: anvil
+    command: anvil --host 0.0.0.0
+    ports:
+      - "8545:8545"
+
+  # Observability Stack
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployments/prometheus:/etc/prometheus
+    command: --config.file=/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana-oss:9.5.3
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.45
+    container_name: jaeger
+    ports:
+      - "6831:6831/udp" # Agent
+      - "16686:16686"   # UI
+
+volumes:
+  postgres_data:
+  grafana_data:
