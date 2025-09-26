@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS deliveries;
+DROP TABLE IF EXISTS outbox;
+DROP TABLE IF EXISTS subscriptions;
+DROP TABLE IF EXISTS evm_logs;
+DROP TABLE IF EXISTS blocks;
+DROP TABLE IF EXISTS chain_head;
