@@ -1,25 +1,60 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/0xphantomotr/ForkGuard/internal/config"
+	"github.com/0xphantomotr/ForkGuard/internal/db"
+	"github.com/0xphantomotr/ForkGuard/internal/ingestor"
+	"github.com/0xphantomotr/ForkGuard/internal/storage"
 )
 
 func main() {
-	fmt.Println("Starting ForkGuard Ingestor...")
+	log.Println("Starting ForkGuard Ingestor...")
 
+	// Load configuration
+	cfg := config.Load()
+
+	// Create a new database connection pool
+	pool, err := db.New(context.Background(), cfg.DatabaseDSN)
+	if err != nil {
+		log.Fatalf("Failed to connect to the database: %v", err)
+	}
+	defer pool.Close()
+
+	log.Println("✅ Successfully connected to the database!")
+
+	// Create a new storage instance
+	pgStorage := storage.NewPostgresStorage(pool)
+
+	// Create a new ingestor
+	ing, err := ingestor.New(context.Background(), cfg.EthRpcURL, pgStorage)
+	if err != nil {
+		log.Fatalf("Failed to create ingestor: %v", err)
+	}
+	defer ing.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start the ingestor in a separate goroutine
+	go func() {
+		if err := ing.Run(ctx); err != nil {
+			log.Fatalf("Ingestor failed: %v", err)
+		}
+	}()
+
+	// Set up a channel to listen for OS signals
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("Ingestor running. Press Ctrl+C to exit.")
-
+	// Block until a signal is received
 	<-stop
 
-	fmt.Println("Shutting down Ingestor...")
-
-	time.Sleep(1 * time.Second)
-	fmt.Println("Ingestor stopped.")
+	log.Println("Shutting down Ingestor...")
+	cancel() // Signal the ingestor to stop
 }
