@@ -9,12 +9,12 @@ import (
 
 	"github.com/0xphantomotr/ForkGuard/internal/config"
 	"github.com/0xphantomotr/ForkGuard/internal/db"
-	"github.com/0xphantomotr/ForkGuard/internal/ingestor"
+	"github.com/0xphantomotr/ForkGuard/internal/publisher"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 )
 
 func main() {
-	log.Println("Starting ForkGuard Ingestor...")
+	log.Println("Starting ForkGuard Publisher...")
 
 	// Load configuration
 	cfg := config.Load()
@@ -31,20 +31,20 @@ func main() {
 	// Create a new storage instance
 	pgStorage := storage.NewPostgresStorage(pool)
 
-	// Create a new ingestor
-	ing, err := ingestor.New(context.Background(), cfg.EthRpcURL, pgStorage, cfg.ConfirmationDepth)
+	// Create a new publisher
+	pub, err := publisher.New(pgStorage, cfg.KafkaBrokers)
 	if err != nil {
-		log.Fatalf("Failed to create ingestor: %v", err)
+		log.Fatalf("Failed to create publisher: %v", err)
 	}
-	defer ing.Close()
+	defer pub.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start the ingestor in a separate goroutine
+	// Start the publisher in a separate goroutine
 	go func() {
-		if err := ing.Run(ctx); err != nil {
-			log.Fatalf("Ingestor failed: %v", err)
+		if err := pub.Run(ctx); err != nil {
+			log.Fatalf("Publisher failed: %v", err)
 		}
 	}()
 
@@ -55,6 +55,6 @@ func main() {
 	// Block until a signal is received
 	<-stop
 
-	log.Println("Shutting down Ingestor...")
-	cancel() // Signal the ingestor to stop
+	log.Println("Shutting down Publisher...")
+	cancel() // Signal the publisher to stop
 }
