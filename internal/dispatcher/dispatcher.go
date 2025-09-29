@@ -2,6 +2,7 @@ package dispatcher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -58,7 +59,24 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 
 			switch e := ev.(type) {
 			case *kafka.Message:
-				log.Printf("📬 Received message from topic %s: %s", *e.TopicPartition.Topic, string(e.Value))
+				log.Printf("📬 Received message from topic %s", *e.TopicPartition.Topic)
+
+				var eventPayload storage.EventPayload
+				if err := json.Unmarshal(e.Value, &eventPayload); err != nil {
+					log.Printf("🚨 Failed to unmarshal event payload: %v", err)
+					continue
+				}
+
+				subs, err := d.storage.GetMatchingSubscriptions(ctx, &eventPayload)
+				if err != nil {
+					log.Printf("🚨 Failed to get matching subscriptions: %v", err)
+					continue
+				}
+
+				if len(subs) > 0 {
+					log.Printf("Found %d matching subscriptions for event %s", len(subs), eventPayload.ID)
+				}
+
 			case kafka.Error:
 				log.Printf("🚨 Kafka consumer error: %v", e)
 			default:

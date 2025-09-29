@@ -33,6 +33,13 @@ type BlockInfo struct {
 	Timestamp uint64 `json:"timestamp"`
 }
 
+type Subscription struct {
+	ID      string `json:"id"`
+	URL     string `json:"url"`
+	Secret  string `json:"secret"`
+	ChainID int64  `json:"chainId"`
+}
+
 // Storage provides an interface for all database operations.
 type Storage interface {
 	// AddBlock adds a new block to the database.
@@ -51,6 +58,8 @@ type Storage interface {
 	RetractLogsInBlock(ctx context.Context, hash []byte) ([]*OutboxEvent, error)
 	// ConfirmBlock marks a block and its logs as 'CONFIRMED'.
 	ConfirmBlock(ctx context.Context, hash []byte) ([]*OutboxEvent, error)
+	// GetMatchingSubscriptions retrieves all subscriptions that match a given event.
+	GetMatchingSubscriptions(ctx context.Context, event *EventPayload) ([]*Subscription, error)
 	// GetUnpublishedOutboxEvents retrieves all unpublished events from the outbox.
 	GetUnpublishedOutboxEvents(ctx context.Context) ([]*OutboxEvent, error)
 	// MarkOutboxEventAsPublished marks an outbox event as published.
@@ -370,6 +379,45 @@ func (s *PostgresStorage) ConfirmBlock(ctx context.Context, hash []byte) ([]*Out
 	return events, tx.Commit(ctx)
 }
 
+// GetMatchingSubscriptions finds all active subscriptions that match the criteria of an event.
+func (s *PostgresStorage) GetMatchingSubscriptions(ctx context.Context, event *EventPayload) ([]*Subscription, error) {
+	// Note: This is a simplified query. A real implementation would need to handle
+	// wildcard topic matching (e.g., a subscription for topic0 should match events
+	// that have topic0 and any other topics). The current query requires an exact match
+	// on the topics provided in the subscription.
+	query := `
+		SELECT id, url, secret, chain_id
+		FROM subscriptions
+		WHERE active = true
+		  AND chain_id = $1
+		  AND (address IS NULL OR address = $2)
+		  AND (topic0 IS NULL OR topic0 = $3)
+		  AND (topic1 IS NULL OR topic1 = $4)
+		  AND (topic2 IS NULL OR topic2 = $5)
+		  AND (topic3 IS NULL OR topic3 = $6)
+	`
+
+	addressBytes := common.HexToAddress(event.Address).Bytes()
+	topic0, topic1, topic2, topic3 := getTopicsFromHex(event.Topics)
+
+	rows, err := s.pool.Query(ctx, query, event.ChainID, addressBytes, topic0, topic1, topic2, topic3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query for matching subscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var subs []*Subscription
+	for rows.Next() {
+		var sub Subscription
+		if err := rows.Scan(&sub.ID, &sub.URL, &sub.Secret, &sub.ChainID); err != nil {
+			return nil, fmt.Errorf("failed to scan subscription: %w", err)
+		}
+		subs = append(subs, &sub)
+	}
+
+	return subs, nil
+}
+
 // GetUnpublishedOutboxEvents retrieves all unpublished events from the 'outbox' table.
 func (s *PostgresStorage) GetUnpublishedOutboxEvents(ctx context.Context) ([]*OutboxEvent, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, topic, payload FROM outbox WHERE published_at IS NULL ORDER BY id ASC`)
@@ -414,4 +462,20 @@ func getTopicsAsHex(log FullLog) []string {
 		topics = append(topics, common.BytesToHash(log.Topic3).Hex())
 	}
 	return topics
+}
+
+func getTopicsFromHex(topics []string) (topic0, topic1, topic2, topic3 []byte) {
+	if len(topics) > 0 && topics[0] != "" {
+		topic0 = common.HexToHash(topics[0]).Bytes()
+	}
+	if len(topics) > 1 && topics[1] != "" {
+		topic1 = common.HexToHash(topics[1]).Bytes()
+	}
+	if len(topics) > 2 && topics[2] != "" {
+		topic2 = common.HexToHash(topics[2]).Bytes()
+	}
+	if len(topics) > 3 && topics[3] != "" {
+		topic3 = common.HexToHash(topics[3]).Bytes()
+	}
+	return
 }
