@@ -13,6 +13,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// Delivery represents a webhook delivery attempt.
+type Delivery struct {
+	ID             int64
+	SubscriptionID string
+	EventID        string
+	Attempt        int
+	Status         string
+	NextAttemptAt  time.Time
+	LastError      *string
+	Payload        []byte
+	Subscription   *Subscription
+}
+
 // EventPayload defines the structure of the JSON payload for outbox events.
 type EventPayload struct {
 	ID       string    `json:"id"`
@@ -60,6 +73,12 @@ type Storage interface {
 	ConfirmBlock(ctx context.Context, hash []byte) ([]*OutboxEvent, error)
 	// GetMatchingSubscriptions retrieves all subscriptions that match a given event.
 	GetMatchingSubscriptions(ctx context.Context, event *EventPayload) ([]*Subscription, error)
+	// CreateDeliveryJobs creates a batch of pending delivery jobs for an event.
+	CreateDeliveryJobs(ctx context.Context, event *EventPayload, subs []*Subscription) error
+	// GetPendingDeliveries retrieves all deliveries that are ready to be attempted.
+	GetPendingDeliveries(ctx context.Context, limit int) ([]*Delivery, error)
+	// UpdateDeliveryStatus updates the status of a delivery attempt.
+	UpdateDeliveryStatus(ctx context.Context, delivery *Delivery) error
 	// GetUnpublishedOutboxEvents retrieves all unpublished events from the outbox.
 	GetUnpublishedOutboxEvents(ctx context.Context) ([]*OutboxEvent, error)
 	// MarkOutboxEventAsPublished marks an outbox event as published.
@@ -416,6 +435,82 @@ func (s *PostgresStorage) GetMatchingSubscriptions(ctx context.Context, event *E
 	}
 
 	return subs, nil
+}
+
+// CreateDeliveryJobs inserts a batch of new, pending delivery jobs into the database.
+func (s *PostgresStorage) CreateDeliveryJobs(ctx context.Context, event *EventPayload, subs []*Subscription) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	payloadBytes, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("failed to marshal event payload for delivery job: %w", err)
+	}
+
+	for _, sub := range subs {
+		query := `
+			INSERT INTO deliveries (subscription_id, event_id, attempt, status, next_attempt_at, payload)
+			VALUES ($1, $2, 1, 'PENDING', now(), $3)
+			ON CONFLICT (subscription_id, event_id) DO NOTHING
+		`
+		if _, err := tx.Exec(ctx, query, sub.ID, event.ID, payloadBytes); err != nil {
+			return fmt.Errorf("failed to insert delivery job: %w", err)
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// GetPendingDeliveries fetches all deliveries that are currently in a 'PENDING' state
+// and are scheduled to be attempted. It locks the rows to prevent other workers from picking them up.
+func (s *PostgresStorage) GetPendingDeliveries(ctx context.Context, limit int) ([]*Delivery, error) {
+	query := `
+		SELECT d.id, d.subscription_id, d.event_id, d.attempt, d.status, d.next_attempt_at, d.last_error, d.payload,
+			   s.url, s.secret, s.chain_id
+		FROM deliveries d
+		JOIN subscriptions s ON d.subscription_id = s.id
+		WHERE d.status = 'PENDING' AND d.next_attempt_at <= now()
+		ORDER BY d.next_attempt_at ASC
+		LIMIT $1
+		FOR UPDATE SKIP LOCKED
+	`
+	rows, err := s.pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query for pending deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	var deliveries []*Delivery
+	for rows.Next() {
+		var d Delivery
+		var sub Subscription
+		if err := rows.Scan(&d.ID, &d.SubscriptionID, &d.EventID, &d.Attempt, &d.Status, &d.NextAttemptAt, &d.LastError, &d.Payload,
+			&sub.URL, &sub.Secret, &sub.ChainID); err != nil {
+			return nil, fmt.Errorf("failed to scan pending delivery: %w", err)
+		}
+		sub.ID = d.SubscriptionID
+		d.Subscription = &sub
+		deliveries = append(deliveries, &d)
+	}
+
+	return deliveries, nil
+}
+
+// UpdateDeliveryStatus updates the state of a delivery job after an attempt.
+func (s *PostgresStorage) UpdateDeliveryStatus(ctx context.Context, delivery *Delivery) error {
+	query := `
+		UPDATE deliveries
+		SET status = $1, attempt = $2, next_attempt_at = $3, last_error = $4
+		WHERE id = $5
+	`
+	_, err := s.pool.Exec(ctx, query, delivery.Status, delivery.Attempt, delivery.NextAttemptAt, delivery.LastError, delivery.ID)
+	if err != nil {
+		return fmt.Errorf("failed to update delivery status: %w", err)
+	}
+	return nil
 }
 
 // GetUnpublishedOutboxEvents retrieves all unpublished events from the 'outbox' table.

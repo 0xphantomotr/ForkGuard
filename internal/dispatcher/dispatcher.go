@@ -9,20 +9,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
-// Consumes events and delivers them to subscribers.
+const maxRetries = 10
+
+// Dispatcher is responsible for consuming events and delivering them to subscribers.
 type Dispatcher struct {
 	storage  storage.Storage
 	consumer *kafka.Consumer
+	producer *kafka.Producer
 }
 
-// Creates a new Dispatcher.
+// New creates a new Dispatcher.
 func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatcher, error) {
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": kafkaBrokers,
@@ -33,19 +38,47 @@ func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatc
 		return nil, fmt.Errorf("failed to create Kafka consumer: %w", err)
 	}
 
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": kafkaBrokers})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kafka producer: %w", err)
+	}
+
 	return &Dispatcher{
 		storage:  storage,
 		consumer: consumer,
+		producer: producer,
 	}, nil
 }
 
-// Closes the Kafka consumer.
+// Close closes the Kafka consumer.
 func (d *Dispatcher) Close() {
 	d.consumer.Close()
+	d.producer.Close()
 }
 
-// Starts the dispatcher's main loop.
+// Run starts the dispatcher's main loop, launching the consumer and worker.
 func (d *Dispatcher) Run(ctx context.Context) error {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		if err := d.runConsumer(ctx); err != nil {
+			log.Printf("🚨 Consumer exited with error: %v", err)
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		d.runWorker(ctx)
+	}()
+
+	wg.Wait()
+	return nil
+}
+
+// runConsumer consumes events from Kafka and creates delivery jobs in the database.
+func (d *Dispatcher) runConsumer(ctx context.Context) error {
 	topics := []string{"forkguard.evm.log.confirmed", "forkguard.evm.log.retracted"}
 	if err := d.consumer.SubscribeTopics(topics, nil); err != nil {
 		return fmt.Errorf("failed to subscribe to topics: %w", err)
@@ -79,21 +112,94 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 				}
 
 				if len(subs) > 0 {
-					log.Printf("Found %d matching subscriptions for event %s", len(subs), eventPayload.ID)
-					for _, sub := range subs {
-						if err := d.deliverWebhook(ctx, sub, e.Value); err != nil {
-							log.Printf("🚨 Failed to deliver webhook for subscription %s: %v", sub.ID, err)
-						}
+					log.Printf("Found %d matching subscriptions for event %s, creating delivery jobs...", len(subs), eventPayload.ID)
+					if err := d.storage.CreateDeliveryJobs(ctx, &eventPayload, subs); err != nil {
+						log.Printf("🚨 Failed to create delivery jobs: %v", err)
 					}
 				}
 
 			case kafka.Error:
-				log.Printf("🚨 Kafka consumer error: %v", e)
+				// This is a non-fatal error, so we just log it.
+				if e.Code() != kafka.ErrAllBrokersDown {
+					log.Printf("🚨 Kafka consumer error: %v", e)
+				}
 			default:
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}
+}
+
+// runWorker periodically fetches and processes pending deliveries.
+func (d *Dispatcher) runWorker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			deliveries, err := d.storage.GetPendingDeliveries(ctx, 100)
+			if err != nil {
+				log.Printf("🚨 Failed to get pending deliveries: %v", err)
+				continue
+			}
+
+			if len(deliveries) > 0 {
+				log.Printf("Processing %d pending deliveries", len(deliveries))
+			}
+
+			for _, delivery := range deliveries {
+				d.processDelivery(ctx, delivery)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// processDelivery attempts to deliver a webhook and updates its status.
+func (d *Dispatcher) processDelivery(ctx context.Context, delivery *storage.Delivery) {
+	err := d.deliverWebhook(ctx, delivery.Subscription, delivery.Payload)
+
+	if err != nil {
+		log.Printf("⚠️ Delivery attempt %d for event %s failed: %v", delivery.Attempt, delivery.EventID, err)
+		delivery.Attempt++
+		errorString := err.Error()
+		delivery.LastError = &errorString
+
+		if delivery.Attempt > maxRetries {
+			delivery.Status = "FAILED" // Terminal state
+			log.Printf("🚨 Event %s has failed its final delivery attempt.", delivery.EventID)
+			d.publishToDLQ(delivery)
+		} else {
+			delivery.Status = "PENDING"
+			// Exponential backoff: 1s, 2s, 4s, 8s, ...
+			backoff := time.Duration(math.Pow(2, float64(delivery.Attempt-1))) * time.Second
+			delivery.NextAttemptAt = time.Now().Add(backoff)
+			log.Printf("Retrying event %s in %s", delivery.EventID, backoff)
+		}
+	} else {
+		log.Printf("✅ Successfully delivered webhook for event %s", delivery.EventID)
+		delivery.Status = "OK"
+	}
+
+	if err := d.storage.UpdateDeliveryStatus(ctx, delivery); err != nil {
+		log.Printf("🚨🚨 CRITICAL: Failed to update delivery status for event %s: %v", delivery.EventID, err)
+	}
+}
+
+// publishToDLQ sends a failed event to the dead-letter queue.
+func (d *Dispatcher) publishToDLQ(delivery *storage.Delivery) {
+	topic := "forkguard.evm.log.dlq"
+	d.producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Value:          delivery.Payload,
+		Headers: []kafka.Header{
+			{Key: "original_event_id", Value: []byte(delivery.EventID)},
+			{Key: "final_error", Value: []byte(*delivery.LastError)},
+		},
+	}, nil)
+	log.Printf("📬 Published event %s to DLQ topic: %s", delivery.EventID, topic)
 }
 
 func (d *Dispatcher) deliverWebhook(ctx context.Context, sub *storage.Subscription, payload []byte) error {
@@ -111,20 +217,16 @@ func (d *Dispatcher) deliverWebhook(ctx context.Context, sub *storage.Subscripti
 	req.Header.Set("X-ForkGuard-Signature-256", signature)
 	req.Header.Set("User-Agent", "ForkGuard/1.0")
 
-	log.Printf("Delivering webhook to %s for subscription %s", sub.URL, sub.ID)
-
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send http request: %w", err)
+		return fmt.Errorf("http client error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Printf("✅ Successfully delivered webhook to %s (Status: %s)", sub.URL, resp.Status)
-	} else {
-		log.Printf("⚠️ Webhook delivery to %s failed (Status: %s)", sub.URL, resp.Status)
+		return nil // Success
 	}
 
-	return nil
+	return fmt.Errorf("delivery failed with status: %s", resp.Status)
 }

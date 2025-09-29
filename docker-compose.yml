@@ -143,6 +143,18 @@ services:
       - FG_KAFKA_BROKERS=redpanda:29092
       - FG_ETH_RPC_URL=ws://anvil:8545
 
+  # webhook-receiver:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.webhook-receiver
+  #   container_name: webhook-receiver
+  #   ports:
+  #     - "8000:8000"
+  #   environment:
+  #     # Make the webhook fail every time for this (testing purposes)
+  #     - FAIL_COUNT=4
+
+
 volumes:
   postgres_data:
   grafana_data:
