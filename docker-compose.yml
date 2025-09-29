@@ -128,6 +128,20 @@ services:
       - FG_KAFKA_BROKERS=redpanda:29092
       - FG_ETH_RPC_URL=ws://anvil:8545
 
+  dispatcher:
+    build:
+      context: .
+      target: dispatcher
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_started
+    environment:
+      - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
+      - FG_KAFKA_BROKERS=redpanda:29092
+      - FG_ETH_RPC_URL=ws://anvil:8545
+      
 volumes:
   postgres_data:
   grafana_data:

@@ -13,6 +13,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /bin/ingestor ./cmd/ingestor
 # Build publisher with CGO enabled for librdkafka
 RUN go build -o /bin/publisher ./cmd/publisher
+RUN go build -o /bin/dispatcher ./cmd/dispatcher
 
 # Final stage for ingestor
 FROM alpine:latest AS ingestor
@@ -27,3 +28,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends librdkafka++1 &
 WORKDIR /app
 COPY --from=builder /bin/publisher .
 ENTRYPOINT ["./publisher"]
+
+# Final stage for dispatcher
+FROM debian:bookworm-slim AS dispatcher
+# The dispatcher binary is also dynamically linked against librdkafka
+RUN apt-get update && apt-get install -y --no-install-recommends librdkafka++1 && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=builder /bin/dispatcher .
+ENTRYPOINT ["./dispatcher"]

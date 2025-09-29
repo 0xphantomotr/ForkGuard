@@ -1,0 +1,69 @@
+package dispatcher
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/0xphantomotr/ForkGuard/internal/storage"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+)
+
+// Consumes events and delivers them to subscribers.
+type Dispatcher struct {
+	storage  storage.Storage
+	consumer *kafka.Consumer
+}
+
+// Creates a new Dispatcher.
+func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatcher, error) {
+	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
+		"bootstrap.servers": kafkaBrokers,
+		"group.id":          groupID,
+		"auto.offset.reset": "earliest",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Kafka consumer: %w", err)
+	}
+
+	return &Dispatcher{
+		storage:  storage,
+		consumer: consumer,
+	}, nil
+}
+
+// Closes the Kafka consumer.
+func (d *Dispatcher) Close() {
+	d.consumer.Close()
+}
+
+// Starts the dispatcher's main loop.
+func (d *Dispatcher) Run(ctx context.Context) error {
+	topics := []string{"forkguard.evm.log.confirmed", "forkguard.evm.log.retracted"}
+	if err := d.consumer.SubscribeTopics(topics, nil); err != nil {
+		return fmt.Errorf("failed to subscribe to topics: %w", err)
+	}
+	log.Printf("Subscribed to Kafka topics: %v", topics)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			ev := d.consumer.Poll(100)
+			if ev == nil {
+				continue
+			}
+
+			switch e := ev.(type) {
+			case *kafka.Message:
+				log.Printf("📬 Received message from topic %s: %s", *e.TopicPartition.Topic, string(e.Value))
+			case kafka.Error:
+				log.Printf("🚨 Kafka consumer error: %v", e)
+			default:
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+}
