@@ -40,3 +40,7 @@ db-reset:
 	docker compose exec -T postgres psql -U forkguard -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'forkguard' AND pid <> pg_backend_pid();"
 	docker compose exec -T postgres dropdb --if-exists --username=forkguard forkguard
 	docker compose exec -T postgres createdb --username=forkguard forkguard
+
+clean:
+	@echo "Cleaning up unused Docker objects..."
+	docker system prune -a --force

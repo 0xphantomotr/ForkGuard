@@ -1,10 +1,15 @@
 package dispatcher
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
@@ -75,6 +80,11 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 
 				if len(subs) > 0 {
 					log.Printf("Found %d matching subscriptions for event %s", len(subs), eventPayload.ID)
+					for _, sub := range subs {
+						if err := d.deliverWebhook(ctx, sub, e.Value); err != nil {
+							log.Printf("🚨 Failed to deliver webhook for subscription %s: %v", sub.ID, err)
+						}
+					}
 				}
 
 			case kafka.Error:
@@ -84,4 +94,37 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (d *Dispatcher) deliverWebhook(ctx context.Context, sub *storage.Subscription, payload []byte) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", sub.URL, bytes.NewBuffer(payload))
+	if err != nil {
+		return fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	// Sign the payload using HMAC-SHA256
+	mac := hmac.New(sha256.New, []byte(sub.Secret))
+	mac.Write(payload)
+	signature := hex.EncodeToString(mac.Sum(nil))
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-ForkGuard-Signature-256", signature)
+	req.Header.Set("User-Agent", "ForkGuard/1.0")
+
+	log.Printf("Delivering webhook to %s for subscription %s", sub.URL, sub.ID)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("✅ Successfully delivered webhook to %s (Status: %s)", sub.URL, resp.Status)
+	} else {
+		log.Printf("⚠️ Webhook delivery to %s failed (Status: %s)", sub.URL, resp.Status)
+	}
+
+	return nil
 }

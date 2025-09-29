@@ -50,7 +50,7 @@ services:
 
   # Ethereum Mock Node
   anvil:
-    image: ghcr.io/foundry-rs/foundry:latest
+    image: ghcr.io/foundry-rs/foundry:latest # Use the official stable release tag
     container_name: anvil
     entrypoint:
       - anvil
@@ -75,6 +75,7 @@ services:
       postgres:
         condition: service_healthy
     restart: on-failure
+
   # Observability Stack
   prometheus:
     image: prom/prometheus:v2.45.0
@@ -141,7 +142,7 @@ services:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
       - FG_KAFKA_BROKERS=redpanda:29092
       - FG_ETH_RPC_URL=ws://anvil:8545
-      
+
 volumes:
   postgres_data:
   grafana_data:
