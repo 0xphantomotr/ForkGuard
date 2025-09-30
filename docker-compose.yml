@@ -138,21 +138,25 @@ services:
         condition: service_completed_successfully
       redpanda:
         condition: service_started
+      redis:
+        condition: service_healthy
     environment:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
       - FG_KAFKA_BROKERS=redpanda:29092
       - FG_ETH_RPC_URL=ws://anvil:8545
+      - FG_REDIS_URL=redis://redis:6379/0
+      - FG_IDEMPOTENCY_KEY_TTL=5m
 
-  # webhook-receiver:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile.webhook-receiver
-  #   container_name: webhook-receiver
-  #   ports:
-  #     - "8000:8000"
-  #   environment:
-  #     # Make the webhook fail every time for this (testing purposes)
-  #     - FAIL_COUNT=4
+  webhook-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook-receiver
+    container_name: webhook-receiver
+    ports:
+      - "8000:8000"
+    # environment:
+      # To test failures, you can set FAIL_COUNT
+      # - FAIL_COUNT=4
 
 
 volumes:

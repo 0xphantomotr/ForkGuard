@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -14,23 +15,27 @@ import (
 	"sync"
 	"time"
 
+	"github.com/0xphantomotr/ForkGuard/internal/config"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/redis/go-redis/v9"
 )
 
 const maxRetries = 10
 
 // Dispatcher is responsible for consuming events and delivering them to subscribers.
 type Dispatcher struct {
-	storage  storage.Storage
-	consumer *kafka.Consumer
-	producer *kafka.Producer
+	storage           storage.Storage
+	consumer          *kafka.Consumer
+	producer          *kafka.Producer
+	redisClient       *redis.Client
+	idempotencyKeyTTL time.Duration
 }
 
 // New creates a new Dispatcher.
-func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatcher, error) {
+func New(cfg *config.Config, storage storage.Storage, groupID string) (*Dispatcher, error) {
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": kafkaBrokers,
+		"bootstrap.servers": cfg.KafkaBrokers,
 		"group.id":          groupID,
 		"auto.offset.reset": "earliest",
 	})
@@ -38,15 +43,24 @@ func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatc
 		return nil, fmt.Errorf("failed to create Kafka consumer: %w", err)
 	}
 
-	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": kafkaBrokers})
+	producer, err := kafka.NewProducer(&kafka.ConfigMap{"bootstrap.servers": cfg.KafkaBrokers})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Kafka producer: %w", err)
 	}
 
+	redisOpts, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse redis url: %w", err)
+	}
+
+	redisClient := redis.NewClient(redisOpts)
+
 	return &Dispatcher{
-		storage:  storage,
-		consumer: consumer,
-		producer: producer,
+		storage:           storage,
+		consumer:          consumer,
+		producer:          producer,
+		redisClient:       redisClient,
+		idempotencyKeyTTL: cfg.IdempotencyKeyTTL,
 	}, nil
 }
 
@@ -54,6 +68,7 @@ func New(storage storage.Storage, kafkaBrokers string, groupID string) (*Dispatc
 func (d *Dispatcher) Close() {
 	d.consumer.Close()
 	d.producer.Close()
+	d.redisClient.Close()
 }
 
 // Run starts the dispatcher's main loop, launching the consumer and worker.
@@ -159,7 +174,25 @@ func (d *Dispatcher) runWorker(ctx context.Context) {
 
 // processDelivery attempts to deliver a webhook and updates its status.
 func (d *Dispatcher) processDelivery(ctx context.Context, delivery *storage.Delivery) {
-	err := d.deliverWebhook(ctx, delivery.Subscription, delivery.Payload)
+	idempotencyKey := fmt.Sprintf("delivery:%s:%s", delivery.SubscriptionID, delivery.EventID)
+
+	// Check for idempotency
+	err := d.redisClient.Get(ctx, idempotencyKey).Err()
+	if err == nil {
+		// Key exists, meaning we've already successfully processed this delivery.
+		log.Printf(" idempotency key %s found, skipping duplicate delivery", idempotencyKey)
+		delivery.Status = "OK"
+		if err := d.storage.UpdateDeliveryStatus(ctx, delivery); err != nil {
+			log.Printf(" CRITICAL: Failed to update delivery status for event %s: %v", delivery.EventID, err)
+		}
+		return
+	} else if !errors.Is(err, redis.Nil) {
+		// An actual error occurred with Redis
+		log.Printf(" ERROR: Failed to check idempotency key %s: %v", idempotencyKey, err)
+		// We'll proceed with the delivery attempt, as this might be a transient Redis issue.
+	}
+
+	err = d.deliverWebhook(ctx, delivery.Subscription, delivery.Payload)
 
 	if err != nil {
 		log.Printf("⚠️ Delivery attempt %d for event %s failed: %v", delivery.Attempt, delivery.EventID, err)
@@ -181,6 +214,12 @@ func (d *Dispatcher) processDelivery(ctx context.Context, delivery *storage.Deli
 	} else {
 		log.Printf("✅ Successfully delivered webhook for event %s", delivery.EventID)
 		delivery.Status = "OK"
+
+		// Set the idempotency key in Redis on successful delivery
+		err := d.redisClient.Set(ctx, idempotencyKey, "delivered", d.idempotencyKeyTTL).Err()
+		if err != nil {
+			log.Printf(" ERROR: Failed to set idempotency key %s: %v", idempotencyKey, err)
+		}
 	}
 
 	if err := d.storage.UpdateDeliveryStatus(ctx, delivery); err != nil {

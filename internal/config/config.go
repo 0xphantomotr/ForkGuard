@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -14,6 +15,8 @@ type Config struct {
 	EthRpcURL         string
 	ConfirmationDepth uint64
 	KafkaBrokers      string
+	RedisURL          string
+	IdempotencyKeyTTL time.Duration
 }
 
 // Load the configuration from env
@@ -46,10 +49,26 @@ func Load() *Config {
 		log.Fatal("FG_KAFKA_BROKERS environment variable is not set")
 	}
 
+	redisURL := os.Getenv("FG_REDIS_URL")
+	if redisURL == "" {
+		log.Fatal("FG_REDIS_URL environment variable is not set")
+	}
+
+	idempotencyKeyTTLStr := os.Getenv("FG_IDEMPOTENCY_KEY_TTL")
+	if idempotencyKeyTTLStr == "" {
+		idempotencyKeyTTLStr = "24h" // Default to 24 hours
+	}
+	idempotencyKeyTTL, err := time.ParseDuration(idempotencyKeyTTLStr)
+	if err != nil {
+		log.Fatalf("Invalid FG_IDEMPOTENCY_KEY_TTL: %v", err)
+	}
+
 	return &Config{
 		DatabaseDSN:       dsn,
 		EthRpcURL:         rpcURL,
 		ConfirmationDepth: confDepth,
 		KafkaBrokers:      kafkaBrokers,
+		RedisURL:          redisURL,
+		IdempotencyKeyTTL: idempotencyKeyTTL,
 	}
 }

@@ -32,7 +32,7 @@ func main() {
 	pgStorage := storage.NewPostgresStorage(pool)
 
 	// New dispatcher
-	disp, err := dispatcher.New(pgStorage, cfg.KafkaBrokers, "forkguard-dispatcher-group")
+	disp, err := dispatcher.New(cfg, pgStorage, "forkguard-dispatcher-group")
 	if err != nil {
 		log.Fatalf("Failed to create dispatcher: %v", err)
 	}
