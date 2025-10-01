@@ -147,6 +147,18 @@ services:
       - FG_REDIS_URL=redis://redis:6379/0
       - FG_IDEMPOTENCY_KEY_TTL=5m
 
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
+
   webhook-receiver:
     build:
       context: .

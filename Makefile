@@ -31,7 +31,7 @@ run-ingestor:
 	docker compose up ingestor --build
 
 run-services:
-	docker compose up -d postgres redis redpanda anvil prometheus grafana jaeger
+	docker compose up -d postgres redis redpanda anvil prometheus grafana jaeger api
 	
 run-publisher:
 	docker compose up publisher --build

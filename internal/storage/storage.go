@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var ErrNotFound = pgx.ErrNoRows
+
 // Delivery represents a webhook delivery attempt.
 type Delivery struct {
 	ID             int64
@@ -47,10 +49,21 @@ type BlockInfo struct {
 }
 
 type Subscription struct {
-	ID      string `json:"id"`
-	URL     string `json:"url"`
-	Secret  string `json:"secret"`
-	ChainID int64  `json:"chainId"`
+	ID        string     `json:"id"`
+	Tenant    string     `json:"tenant"`
+	ChainID   int64      `json:"chainId"`
+	URL       string     `json:"url"`
+	Secret    string     `json:"-"`
+	MinConfs  int        `json:"minConfs"`
+	Address   *string    `json:"address,omitempty"`
+	Topic0    *string    `json:"topic0,omitempty"`
+	Topic1    *string    `json:"topic1,omitempty"`
+	Topic2    *string    `json:"topic2,omitempty"`
+	Topic3    *string    `json:"topic3,omitempty"`
+	FromBlock *uint64    `json:"fromBlock,omitempty"`
+	Active    bool       `json:"active"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 }
 
 // Storage provides an interface for all database operations.
@@ -83,6 +96,13 @@ type Storage interface {
 	GetUnpublishedOutboxEvents(ctx context.Context) ([]*OutboxEvent, error)
 	// MarkOutboxEventAsPublished marks an outbox event as published.
 	MarkOutboxEventAsPublished(ctx context.Context, eventID int64) error
+
+	// Subscription CRUD
+	CreateSubscription(ctx context.Context, sub *Subscription) error
+	GetSubscription(ctx context.Context, id, tenant string) (*Subscription, error)
+	ListSubscriptions(ctx context.Context, tenant string) ([]*Subscription, error)
+	UpdateSubscription(ctx context.Context, sub *Subscription) error
+	DeleteSubscription(ctx context.Context, id, tenant string) error
 }
 
 // PostgresStorage is the PostgreSQL implementation of the Storage interface.
@@ -540,6 +560,152 @@ func (s *PostgresStorage) MarkOutboxEventAsPublished(ctx context.Context, eventI
 		return fmt.Errorf("failed to mark outbox event as published: %w", err)
 	}
 	return nil
+}
+
+// --- Subscription CRUD ---
+
+func (s *PostgresStorage) CreateSubscription(ctx context.Context, sub *Subscription) error {
+	query := `
+		INSERT INTO subscriptions (tenant, chain_id, url, secret, min_confs, address, topic0, topic1, topic2, topic3, from_block, active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		RETURNING id, created_at
+	`
+	addressBytes, topic0Bytes, topic1Bytes, topic2Bytes, topic3Bytes := subFilterToBytes(sub)
+
+	err := s.pool.QueryRow(ctx, query,
+		sub.Tenant, sub.ChainID, sub.URL, sub.Secret, sub.MinConfs,
+		addressBytes, topic0Bytes, topic1Bytes, topic2Bytes, topic3Bytes,
+		sub.FromBlock, sub.Active,
+	).Scan(&sub.ID, &sub.CreatedAt)
+
+	if err != nil {
+		return fmt.Errorf("failed to create subscription: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStorage) GetSubscription(ctx context.Context, id, tenant string) (*Subscription, error) {
+	query := `
+		SELECT id, tenant, chain_id, url, secret, min_confs, address, topic0, topic1, topic2, topic3, from_block, active, created_at, updated_at
+		FROM subscriptions
+		WHERE id = $1 AND tenant = $2
+	`
+	row := s.pool.QueryRow(ctx, query, id, tenant)
+	return s.scanSubscription(row)
+}
+
+func (s *PostgresStorage) ListSubscriptions(ctx context.Context, tenant string) ([]*Subscription, error) {
+	query := `
+		SELECT id, tenant, chain_id, url, secret, min_confs, address, topic0, topic1, topic2, topic3, from_block, active, created_at, updated_at
+		FROM subscriptions
+		WHERE tenant = $1
+		ORDER BY created_at DESC
+	`
+	rows, err := s.pool.Query(ctx, query, tenant)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list subscriptions: %w", err)
+	}
+	defer rows.Close()
+
+	var subs []*Subscription
+	for rows.Next() {
+		sub, err := s.scanSubscription(rows)
+		if err != nil {
+			return nil, err
+		}
+		subs = append(subs, sub)
+	}
+	return subs, nil
+}
+
+func (s *PostgresStorage) UpdateSubscription(ctx context.Context, sub *Subscription) error {
+	query := `
+		UPDATE subscriptions
+		SET url = $1, secret = $2, min_confs = $3, address = $4, topic0 = $5, topic1 = $6, topic2 = $7, topic3 = $8, from_block = $9, active = $10, updated_at = now()
+		WHERE id = $11 AND tenant = $12
+	`
+	addressBytes, topic0Bytes, topic1Bytes, topic2Bytes, topic3Bytes := subFilterToBytes(sub)
+
+	_, err := s.pool.Exec(ctx, query,
+		sub.URL, sub.Secret, sub.MinConfs,
+		addressBytes, topic0Bytes, topic1Bytes, topic2Bytes, topic3Bytes,
+		sub.FromBlock, sub.Active,
+		sub.ID, sub.Tenant,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to update subscription: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStorage) DeleteSubscription(ctx context.Context, id, tenant string) error {
+	query := `DELETE FROM subscriptions WHERE id = $1 AND tenant = $2`
+	_, err := s.pool.Exec(ctx, query, id, tenant)
+	if err != nil {
+		return fmt.Errorf("failed to delete subscription: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStorage) scanSubscription(row pgx.Row) (*Subscription, error) {
+	var sub Subscription
+	var address, topic0, topic1, topic2, topic3 []byte
+
+	err := row.Scan(
+		&sub.ID, &sub.Tenant, &sub.ChainID, &sub.URL, &sub.Secret, &sub.MinConfs,
+		&address, &topic0, &topic1, &topic2, &topic3,
+		&sub.FromBlock, &sub.Active, &sub.CreatedAt, &sub.UpdatedAt,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to scan subscription: %w", err)
+	}
+
+	// Convert byte slices to hex strings for the API response
+	if address != nil {
+		str := common.BytesToAddress(address).Hex()
+		sub.Address = &str
+	}
+	if topic0 != nil {
+		str := common.BytesToHash(topic0).Hex()
+		sub.Topic0 = &str
+	}
+	if topic1 != nil {
+		str := common.BytesToHash(topic1).Hex()
+		sub.Topic1 = &str
+	}
+	if topic2 != nil {
+		str := common.BytesToHash(topic2).Hex()
+		sub.Topic2 = &str
+	}
+	if topic3 != nil {
+		str := common.BytesToHash(topic3).Hex()
+		sub.Topic3 = &str
+	}
+
+	return &sub, nil
+}
+
+func subFilterToBytes(sub *Subscription) ([]byte, []byte, []byte, []byte, []byte) {
+	var address, topic0, topic1, topic2, topic3 []byte
+	if sub.Address != nil {
+		address = common.HexToAddress(*sub.Address).Bytes()
+	}
+	if sub.Topic0 != nil {
+		topic0 = common.HexToHash(*sub.Topic0).Bytes()
+	}
+	if sub.Topic1 != nil {
+		topic1 = common.HexToHash(*sub.Topic1).Bytes()
+	}
+	if sub.Topic2 != nil {
+		topic2 = common.HexToHash(*sub.Topic2).Bytes()
+	}
+	if sub.Topic3 != nil {
+		topic3 = common.HexToHash(*sub.Topic3).Bytes()
+	}
+	return address, topic0, topic1, topic2, topic3
 }
 
 func getTopicsAsHex(log FullLog) []string {

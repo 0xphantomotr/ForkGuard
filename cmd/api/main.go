@@ -4,12 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/0xphantomotr/ForkGuard/internal/api"
 	"github.com/0xphantomotr/ForkGuard/internal/db"
+	"github.com/0xphantomotr/ForkGuard/internal/storage"
 	"github.com/joho/godotenv"
 )
 
@@ -36,27 +37,25 @@ func main() {
 
 	fmt.Println("✅ Successfully connected to the database!")
 
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "OK")
-	})
+	// Initialize storage
+	pgStorage := storage.NewPostgresStorage(pool)
 
-	server := &http.Server{Addr: ":8080"}
+	// Create and run the API server
+	server := api.NewApiServer(":8080", pgStorage)
 
 	go func() {
 		fmt.Println("Admin API listening on :8080")
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			fmt.Printf("API server error: %v\n", err)
+		if err := server.Run(); err != nil {
+			log.Fatalf("API server failed: %v", err)
 		}
 	}()
 
+	// Graceful shutdown
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-
 	<-stop
 
 	fmt.Println("Shutting down Admin API...")
-
-	server.Shutdown(nil)
+	// Note: We don't have a graceful shutdown on the server yet, but this structure allows for it.
 	fmt.Println("Admin API stopped.")
 }

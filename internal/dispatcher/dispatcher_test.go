@@ -74,6 +74,22 @@ func (s *mockStorage) MarkOutboxEventAsPublished(ctx context.Context, eventID in
 	return nil
 }
 
+func (s *mockStorage) CreateSubscription(ctx context.Context, sub *storage.Subscription) error {
+	return nil
+}
+func (s *mockStorage) GetSubscription(ctx context.Context, id, tenant string) (*storage.Subscription, error) {
+	return nil, nil
+}
+func (s *mockStorage) ListSubscriptions(ctx context.Context, tenant string) ([]*storage.Subscription, error) {
+	return nil, nil
+}
+func (s *mockStorage) UpdateSubscription(ctx context.Context, sub *storage.Subscription) error {
+	return nil
+}
+func (s *mockStorage) DeleteSubscription(ctx context.Context, id, tenant string) error {
+	return nil
+}
+
 func TestDispatcher_ProcessDelivery_Idempotency(t *testing.T) {
 	// --- Setup ---
 	var requestCount int
