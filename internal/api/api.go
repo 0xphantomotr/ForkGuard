@@ -37,6 +37,9 @@ func (s *ApiServer) Run() error {
 	mux.HandleFunc("PATCH /v1/subscriptions/{id}", s.handleUpdateSubscription)
 	mux.HandleFunc("DELETE /v1/subscriptions/{id}", s.handleDeleteSubscription)
 
+	// Replay route
+	mux.HandleFunc("POST /v1/replay", s.handleTriggerReplay)
+
 	server := &http.Server{
 		Addr:    s.listenAddr,
 		Handler: mux,

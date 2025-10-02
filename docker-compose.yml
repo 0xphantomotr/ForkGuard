@@ -158,7 +158,8 @@ services:
         condition: service_completed_successfully
     environment:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
-
+      - FG_ETH_RPC_URL=ws://anvil:8545
+      
   webhook-receiver:
     build:
       context: .

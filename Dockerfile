@@ -15,6 +15,7 @@ RUN CGO_ENABLED=0 go build -o /bin/ingestor ./cmd/ingestor
 RUN go build -o /bin/publisher ./cmd/publisher
 RUN go build -o /bin/dispatcher ./cmd/dispatcher
 RUN CGO_ENABLED=0 go build -o /bin/api ./cmd/api
+RUN CGO_ENABLED=0 go build -o /bin/replayer ./cmd/replayer
 
 # Final stage for ingestor
 FROM alpine:latest AS ingestor
@@ -42,4 +43,5 @@ ENTRYPOINT ["./dispatcher"]
 FROM alpine:latest AS api
 WORKDIR /app
 COPY --from=builder /bin/api .
+COPY --from=builder /bin/replayer .
 ENTRYPOINT ["./api"]

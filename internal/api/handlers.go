@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"os/exec"
 
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 )
@@ -20,7 +23,7 @@ func generateSecret(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
-func (s *ApiServer) readJSON(w http.ResponseWriter, r *http.Request, dst interface{}) error {
+func (s *ApiServer) readJSON(_ http.ResponseWriter, r *http.Request, dst interface{}) error {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
@@ -160,6 +163,34 @@ func (s *ApiServer) handleUpdateSubscription(w http.ResponseWriter, r *http.Requ
 	}
 
 	s.writeJSON(w, http.StatusOK, existingSub)
+}
+
+func (s *ApiServer) handleTriggerReplay(w http.ResponseWriter, r *http.Request) {
+	var req ReplayRequest
+	if err := s.readJSON(w, r, &req); err != nil {
+		s.errorResponse(w, http.StatusBadRequest, "invalid request payload")
+		return
+	}
+
+	log.Printf("Replay requested from block %d to %d", req.StartBlock, req.EndBlock)
+
+	go func() {
+		cmd := exec.Command(
+			"./replayer",
+			"--start", fmt.Sprintf("%d", req.StartBlock),
+			"--end", fmt.Sprintf("%d", req.EndBlock),
+		)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("Replayer command failed: %v\nOutput: %s", err, string(output))
+		} else {
+			log.Printf("Replayer command succeeded:\n%s", string(output))
+		}
+	}()
+
+	s.writeJSON(w, http.StatusAccepted, map[string]string{
+		"message": "replay job accepted",
+	})
 }
 
 func (s *ApiServer) handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {

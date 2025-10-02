@@ -43,6 +43,12 @@ type UpdateSubscriptionRequest struct {
 	Active    *bool   `json:"active,omitempty"`
 }
 
+// ReplayRequest defines the payload for triggering a historical replay.
+type ReplayRequest struct {
+	StartBlock uint64 `json:"start_block"`
+	EndBlock   uint64 `json:"end_block"`
+}
+
 func (r *CreateSubscriptionRequest) toStorageSubscription(tenant, secret string) *storage.Subscription {
 	return &storage.Subscription{
 		Tenant:    tenant,

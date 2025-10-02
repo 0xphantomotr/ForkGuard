@@ -7,8 +7,8 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/0xphantomotr/ForkGuard/internal/blockprocessor"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
-	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 )
@@ -21,6 +21,7 @@ type Ingestor struct {
 	lastBlock          *types.Block
 	confirmationDepth  uint64
 	confirmationWindow []*types.Block
+	processor          *blockprocessor.BlockProcessor
 }
 
 // Create a new Ingestor and connects to the Ethereum node.
@@ -46,6 +47,8 @@ func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmati
 
 	log.Printf("✅ Successfully connected to Ethereum node (Chain ID: %s)", chainID.String())
 
+	processor := blockprocessor.New(client, storage, chainID)
+
 	lastBlock, err := storage.GetLatestBlock(ctx, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block: %w", err)
@@ -63,6 +66,7 @@ func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmati
 		chainID:           chainID,
 		lastBlock:         lastBlock,
 		confirmationDepth: confirmationDepth,
+		processor:         processor,
 	}, nil
 }
 
@@ -96,7 +100,7 @@ func (i *Ingestor) Run(ctx context.Context) error {
 				continue
 			}
 
-			if err := i.processBlock(ctx, block); err != nil {
+			if err := i.processor.ProcessBlock(ctx, block); err != nil {
 				log.Printf("Failed to process block %s: %v", block.Hash().Hex(), err)
 				continue
 			}
@@ -119,29 +123,6 @@ func (i *Ingestor) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-}
-
-func (i *Ingestor) processBlock(ctx context.Context, block *types.Block) error {
-	if err := i.storage.AddBlock(ctx, i.chainID, block); err != nil {
-		return fmt.Errorf("failed to add block: %w", err)
-	}
-
-	blockHash := block.Hash()
-	logs, err := i.client.FilterLogs(ctx, ethereum.FilterQuery{
-		BlockHash: &blockHash,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get logs for block: %w", err)
-	}
-
-	if err := i.storage.AddLogs(ctx, i.chainID, logs); err != nil {
-		return fmt.Errorf("failed to add logs for block: %w", err)
-	}
-
-	log.Printf("📦 Ingested block %d (%s) with %d transactions and %d logs",
-		block.Number(), block.Hash().Hex(), len(block.Transactions()), len(logs))
-
-	return nil
 }
 
 func (i *Ingestor) handleReorg(ctx context.Context, newHeader *types.Header) error {
@@ -208,7 +189,7 @@ func (i *Ingestor) handleReorg(ctx context.Context, newHeader *types.Header) err
 		if err != nil {
 			return fmt.Errorf("failed to get new block during reorg: %w", err)
 		}
-		if err := i.processBlock(ctx, fullBlock); err != nil {
+		if err := i.processor.ProcessBlock(ctx, fullBlock); err != nil {
 			return fmt.Errorf("failed to process new block during reorg: %w", err)
 		}
 	}
