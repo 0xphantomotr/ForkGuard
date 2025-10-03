@@ -5,5 +5,13 @@ scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
-  
-  # We will add scrape configs for our
+
+  - job_name: 'ingestor'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['ingestor:9091']
+
+  - job_name: 'dispatcher'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['dispatcher:9092']

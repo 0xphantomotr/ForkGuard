@@ -42,16 +42,37 @@ services:
       - start
       - --smp 1
       - --overprovisioned
+      - --set redpanda.auto_create_topics_enabled=true
       - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
       - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
     ports:
       - "9092:9092"   # Kafka API
       - "9644:9644"   # Redpanda Admin
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  topic-creator:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      rpk topic create forkguard.evm.log.confirmed -b redpanda:29092 || echo 'topic confirmed already exists' &&
+      rpk topic create forkguard.evm.log.retracted -b redpanda:29092 || echo 'topic retracted already exists' &&
+      rpk topic create forkguard.evm.log.dlq -b redpanda:29092 || echo 'topic dlq already exists'
+      "
+    restart: on-failure
 
   # Ethereum Mock Node
   anvil:
     image: ghcr.io/foundry-rs/foundry:latest # Use the official stable release tag
     container_name: anvil
+    volumes:
+      - ./contracts:/contracts
     entrypoint:
       - anvil
       - --host
@@ -114,6 +135,9 @@ services:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
       - FG_ETH_RPC_URL=ws://anvil:8545
       - FG_KAFKA_BROKERS=redpanda:29092
+      - FG_CONFIRMATION_DEPTH=10
+    ports:
+      - "9091:9091"
 
   publisher:
     build:
@@ -122,8 +146,10 @@ services:
     depends_on:
       migrator:
         condition: service_completed_successfully
-      redpanda:
-        condition: service_started
+      topic-creator:
+        condition: service_completed_successfully
+      anvil:
+        condition: service_healthy
     environment:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
       - FG_KAFKA_BROKERS=redpanda:29092
@@ -136,8 +162,8 @@ services:
     depends_on:
       migrator:
         condition: service_completed_successfully
-      redpanda:
-        condition: service_started
+      topic-creator:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     environment:
@@ -146,6 +172,8 @@ services:
       - FG_ETH_RPC_URL=ws://anvil:8545
       - FG_REDIS_URL=redis://redis:6379/0
       - FG_IDEMPOTENCY_KEY_TTL=5m
+    ports:
+      - "9093:9092"
 
   api:
     build:
@@ -159,7 +187,7 @@ services:
     environment:
       - FORKGUARD_DB_DSN=postgres://forkguard:forkguard@postgres:5432/forkguard?sslmode=disable
       - FG_ETH_RPC_URL=ws://anvil:8545
-      
+
   webhook-receiver:
     build:
       context: .

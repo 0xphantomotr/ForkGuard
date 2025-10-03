@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/0xphantomotr/ForkGuard/internal/blockprocessor"
+	"github.com/0xphantomotr/ForkGuard/internal/metrics"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Ingestor connects to an Ethereum node, subscribing to new heads, and fetching block data.
@@ -22,10 +24,11 @@ type Ingestor struct {
 	confirmationDepth  uint64
 	confirmationWindow []*types.Block
 	processor          *blockprocessor.BlockProcessor
+	metrics            *metrics.IngestorMetrics
 }
 
 // Create a new Ingestor and connects to the Ethereum node.
-func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmationDepth uint64) (*Ingestor, error) {
+func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmationDepth uint64, reg prometheus.Registerer) (*Ingestor, error) {
 	var client *ethclient.Client
 	var err error
 	for i := 0; i < 5; i++ {
@@ -50,6 +53,7 @@ func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmati
 	processor := blockprocessor.New(client, storage, chainID)
 
 	lastBlock, err := storage.GetLatestBlock(ctx, chainID)
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get latest block: %w", err)
 	}
@@ -67,6 +71,7 @@ func New(ctx context.Context, rpcURL string, storage storage.Storage, confirmati
 		lastBlock:         lastBlock,
 		confirmationDepth: confirmationDepth,
 		processor:         processor,
+		metrics:           metrics.NewIngestorMetrics(reg),
 	}, nil
 }
 
@@ -104,6 +109,8 @@ func (i *Ingestor) Run(ctx context.Context) error {
 				log.Printf("Failed to process block %s: %v", block.Hash().Hex(), err)
 				continue
 			}
+			i.metrics.BlocksProcessed.Inc()
+			i.metrics.LatestBlock.Set(float64(block.NumberU64()))
 
 			i.confirmationWindow = append(i.confirmationWindow, block)
 			if len(i.confirmationWindow) > int(i.confirmationDepth) {
@@ -129,6 +136,7 @@ func (i *Ingestor) handleReorg(ctx context.Context, newHeader *types.Header) err
 	log.Printf("🚨 Reorg detected! New block %d (%s) has parent %s, but last block was %d (%s)",
 		newHeader.Number.Uint64(), newHeader.Hash().Hex(), newHeader.ParentHash.Hex(),
 		i.lastBlock.NumberU64(), i.lastBlock.Hash().Hex())
+	i.metrics.ReorgsDetected.Inc()
 
 	// Find the common ancestor
 	var oldBlock *types.Block = i.lastBlock

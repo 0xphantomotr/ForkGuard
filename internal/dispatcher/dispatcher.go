@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/0xphantomotr/ForkGuard/internal/config"
+	"github.com/0xphantomotr/ForkGuard/internal/metrics"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -30,13 +32,14 @@ type Dispatcher struct {
 	producer          *kafka.Producer
 	redisClient       *redis.Client
 	idempotencyKeyTTL time.Duration
+	metrics           *metrics.DispatcherMetrics
 }
 
 // New creates a new Dispatcher.
-func New(cfg *config.Config, storage storage.Storage, groupID string) (*Dispatcher, error) {
+func New(storage storage.Storage, redisClient *redis.Client, cfg *config.Config, reg prometheus.Registerer) (*Dispatcher, error) {
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
 		"bootstrap.servers": cfg.KafkaBrokers,
-		"group.id":          groupID,
+		"group.id":          "forkguard-dispatcher",
 		"auto.offset.reset": "earliest",
 	})
 	if err != nil {
@@ -48,19 +51,13 @@ func New(cfg *config.Config, storage storage.Storage, groupID string) (*Dispatch
 		return nil, fmt.Errorf("failed to create Kafka producer: %w", err)
 	}
 
-	redisOpts, err := redis.ParseURL(cfg.RedisURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse redis url: %w", err)
-	}
-
-	redisClient := redis.NewClient(redisOpts)
-
 	return &Dispatcher{
 		storage:           storage,
 		consumer:          consumer,
 		producer:          producer,
 		redisClient:       redisClient,
 		idempotencyKeyTTL: cfg.IdempotencyKeyTTL,
+		metrics:           metrics.NewDispatcherMetrics(reg),
 	}, nil
 }
 
@@ -185,6 +182,7 @@ func (d *Dispatcher) processDelivery(ctx context.Context, delivery *storage.Deli
 		if err := d.storage.UpdateDeliveryStatus(ctx, delivery); err != nil {
 			log.Printf(" CRITICAL: Failed to update delivery status for event %s: %v", delivery.EventID, err)
 		}
+		d.metrics.WebhooksDelivered.WithLabelValues("success").Inc() // Idempotent skip is a success
 		return
 	} else if !errors.Is(err, redis.Nil) {
 		// An actual error occurred with Redis
@@ -211,9 +209,11 @@ func (d *Dispatcher) processDelivery(ctx context.Context, delivery *storage.Deli
 			delivery.NextAttemptAt = time.Now().Add(backoff)
 			log.Printf("Retrying event %s in %s", delivery.EventID, backoff)
 		}
+		d.metrics.WebhooksDelivered.WithLabelValues("failed").Inc()
 	} else {
 		log.Printf("✅ Successfully delivered webhook for event %s", delivery.EventID)
 		delivery.Status = "OK"
+		d.metrics.WebhooksDelivered.WithLabelValues("success").Inc()
 
 		// Set the idempotency key in Redis on successful delivery
 		err := d.redisClient.Set(ctx, idempotencyKey, "delivered", d.idempotencyKeyTTL).Err()

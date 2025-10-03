@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,7 +11,9 @@ import (
 	"github.com/0xphantomotr/ForkGuard/internal/config"
 	"github.com/0xphantomotr/ForkGuard/internal/db"
 	"github.com/0xphantomotr/ForkGuard/internal/ingestor"
+	"github.com/0xphantomotr/ForkGuard/internal/metrics"
 	"github.com/0xphantomotr/ForkGuard/internal/storage"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -32,7 +35,7 @@ func main() {
 	pgStorage := storage.NewPostgresStorage(pool)
 
 	// Create a new ingestor
-	ing, err := ingestor.New(context.Background(), cfg.EthRpcURL, pgStorage, cfg.ConfirmationDepth)
+	ing, err := ingestor.New(context.Background(), cfg.EthRpcURL, pgStorage, cfg.ConfirmationDepth, metrics.Registry)
 	if err != nil {
 		log.Fatalf("Failed to create ingestor: %v", err)
 	}
@@ -45,6 +48,15 @@ func main() {
 	go func() {
 		if err := ing.Run(ctx); err != nil {
 			log.Fatalf("Ingestor failed: %v", err)
+		}
+	}()
+
+	// Start a separate goroutine for the metrics server
+	go func() {
+		http.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+		log.Println("Metrics server listening on :9091")
+		if err := http.ListenAndServe(":9091", nil); err != nil {
+			log.Printf("Metrics server failed: %v", err)
 		}
 	}()
 
